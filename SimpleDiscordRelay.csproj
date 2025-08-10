@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPublishable>false</IsPublishable>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- CounterStrikeSharp API from NuGet. This is excluded from the output as the server provides it. -->
+    <PackageReference Include="CounterStrikeSharp.API" Version="1.0.333" ExcludeAssets="runtime" />
+
+    <!-- Discord.Net library from NuGet. This is used to interact with the Discord API. -->
+    <PackageReference Include="Discord.Net" Version="3.13.0" />
+    <PackageReference Include="MaxMind.GeoIP2" Version="4.1.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="GeoLite2-Country.mmdb">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>
