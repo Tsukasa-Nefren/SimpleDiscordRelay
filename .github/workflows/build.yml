@@ -1,0 +1,51 @@
+name: Build and Release SimpleDiscordRelay
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+
+    - name: Restore dependencies
+      run: dotnet restore
+
+    - name: Build plugin
+      run: dotnet build --configuration Release --no-restore
+
+    - name: Extract Plugin Version
+      id: version
+      run: |
+        VERSION=$(grep -oP 'ModuleVersion => "\K[^"]+' SimpleDiscordRelay.cs)
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+    - name: Prepare and Archive Release Files
+      run: |
+        # Create the desired folder structure
+        mkdir -p release/addons/counterstrikesharp/plugins/SimpleDiscordRelay
+        
+        # Copy the build output into the new structure
+        cp -r bin/Release/net8.0/* release/addons/counterstrikesharp/plugins/SimpleDiscordRelay/
+        
+        # Create the zip file
+        (cd release && zip -r ../SimpleDiscordRelay-v${{ steps.version.outputs.version }}.zip .)
+
+    - name: Create Release and Upload Artifact
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v${{ steps.version.outputs.version }}
+        name: Release v${{ steps.version.outputs.version }}
+        body: "Automated release for version ${{ steps.version.outputs.version }}."
+        files: SimpleDiscordRelay-v${{ steps.version.outputs.version }}.zip
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
