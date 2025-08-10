@@ -13,7 +13,7 @@ A simple Discord relay plugin for Counter-Strike 2 using CounterStrikeSharp.
 
 ## Installation
 
-1.  **Download the latest release:** Go to the [Releases page](https://github.com/Tsukasa-Nefren/SimpleDiscordRelay-css/releases/latest) of this repository and download the `SimpleDiscordRelay-vX.X.X.zip` file.
+1.  **Download the latest release:** Go to the [Releases page](https://github.com/Tsukasa-Nefren/SimpleDiscordRelay/releases/latest) of this repository and download the `SimpleDiscordRelay-vX.X.X.zip` file.
 2.  **Extract:** Unzip the downloaded file. The required `GeoLite2-Country.mmdb` file is already included.
 3.  **Upload Files:**
     - Create a new folder named `SimpleDiscordRelay` inside your server's `addons/counterstrikesharp/plugins` directory.
