@@ -13,7 +13,9 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using Color = Discord.Color;
 
 namespace SimpleDiscordRelay;
 
@@ -26,7 +28,7 @@ public partial class SimpleDiscordRelay : BasePlugin, IPluginConfig<PluginConfig
 {
     public override string ModuleName => "Simple Discord Relay";
     public override string ModuleAuthor => "Tsukasa";
-    public override string ModuleVersion => "1.0.0";
+    public override string ModuleVersion => "1.0.1";
 
     public PluginConfig Config { get; set; } = new();
 
@@ -115,111 +117,113 @@ public partial class SimpleDiscordRelay : BasePlugin, IPluginConfig<PluginConfig
     private Task OnMessageReceivedAsync(SocketMessage message)
     {
         if (_client == null || message.Author.Id == _client.CurrentUser.Id || message.Author.IsBot)
-        {
             return Task.CompletedTask;
-        }
 
         if (!Config.ChatRelayEnabled || message.Channel.Id != Config.ChatRelayChannelId)
-        {
             return Task.CompletedTask;
-        }
         
         var author = message.Author as SocketGuildUser;
         string authorName = author?.DisplayName ?? message.Author.Username;
 
-        Server.NextFrame(() =>
+        var replacements = new Dictionary<string, string>
         {
-            Server.PrintToChatAll($" {ChatColors.Green}[Discord] {ChatColors.Default}{authorName} ({message.Author.Username}): {ChatColors.White}{message.Content}");
-        });
+            { "{author_name}", authorName },
+            { "{author_username}", message.Author.Username },
+            { "{message}", message.Content }
+        };
+        
+        string chatMessage = FormatMessage(Config.DiscordToGameFormat, replacements);
+        // Replace color names with actual color codes
+        chatMessage = chatMessage.Replace("{Green}", $"{ChatColors.Green}")
+                                 .Replace("{Default}", $"{ChatColors.Default}")
+                                 .Replace("{White}", $"{ChatColors.White}");
+
+        Server.NextFrame(() => Server.PrintToChatAll(chatMessage));
         return Task.CompletedTask;
     }
 
     [GameEventHandler]
     public HookResult OnPlayerChat(EventPlayerChat @event, GameEventInfo info)
     {
-        if (!Config.ChatRelayEnabled)
-            return HookResult.Continue;
+        if (!Config.ChatRelayEnabled) return HookResult.Continue;
 
         var player = Utilities.GetPlayerFromUserid(@event.Userid);
         if (player == null || !player.IsValid || player.AuthorizedSteamID == null || player.UserId == null)
             return HookResult.Continue;
 
         int userId = player.UserId.Value;
-        if (_lastChatTimes.TryGetValue(userId, out var lastChat) && (DateTime.UtcNow - lastChat).TotalMilliseconds < 100)
-        {
+        if (_lastChatTimes.TryGetValue(userId, out var lastChat) && (DateTime.UtcNow - lastChat).TotalMilliseconds < Config.ChatSpamCooldownMs)
             return HookResult.Continue;
-        }
+        
         _lastChatTimes[userId] = DateTime.UtcNow;
 
         var message = @event.Text;
-        if (string.IsNullOrWhiteSpace(message))
-            return HookResult.Continue;
+        if (string.IsNullOrWhiteSpace(message)) return HookResult.Continue;
 
-        string playerName = player.PlayerName;
-        string profileUrl = player.AuthorizedSteamID.ToCommunityUrl().ToString();
-        string countryEmoji = GetPlayerCountryEmoji(player.IpAddress);
-        string prefix = @event.Teamonly ? "[TEAM] " : "";
-        string sanitizedMessage = message.Replace("@", "@\u200B");
+        var replacements = new Dictionary<string, string>
+        {
+            { "{player_name}", player.PlayerName },
+            { "{profile_url}", player.AuthorizedSteamID.ToCommunityUrl().ToString() },
+            { "{country_emoji}", GetPlayerCountryEmoji(player.IpAddress) },
+            { "{message}", SanitizeDiscordMessage(message) },
+            { "{team_prefix}", @event.Teamonly ? "[TEAM] " : "" }
+        };
 
-        string discordMessage = $"{countryEmoji} **{prefix}[{playerName}](<{profileUrl}>)**: {sanitizedMessage}";
-        Task.Run(async () => await SendDiscordMessageAsync(Config.ChatRelayChannelId, discordMessage));
-
+        string formattedMessage = FormatMessage(Config.GameToDiscordFormat, replacements);
+        
+        Task.Run(async () => await SendDiscordMessageAsync(Config.ChatRelayChannelId, formattedMessage, Config.EmbedColorChat));
         return HookResult.Continue;
     }
 
     [GameEventHandler]
     public HookResult OnPlayerConnectFull(EventPlayerConnectFull @event, GameEventInfo info)
     {
-        if (@event.Userid == null)
-            return HookResult.Continue;
+        if (@event.Userid == null) return HookResult.Continue;
 
         var player = @event.Userid;
-        if (player.IsBot || !player.IsValid || player.AuthorizedSteamID == null)
-            return HookResult.Continue;
+        if (player.IsBot || !player.IsValid || player.AuthorizedSteamID == null) return HookResult.Continue;
 
         ulong steamId64 = player.AuthorizedSteamID.SteamId64;
 
         if (player.IpAddress != null)
-        {
             _playerIpCache[steamId64] = new PlayerIpInfo { IpAddress = player.IpAddress };
-        }
         
-        // If a disconnect timer exists for this player, kill it.
         if (_pendingDisconnects.TryGetValue(steamId64, out var disconnectTimer))
         {
             disconnectTimer.Kill();
             _pendingDisconnects.Remove(steamId64);
         }
         
-        if (_reconnectingPlayers.Remove(steamId64))
+        if (_reconnectingPlayers.Remove(steamId64)) return HookResult.Continue;
+        if (!Config.JoinNotificationsEnabled) return HookResult.Continue;
+
+        var replacements = new Dictionary<string, string>
         {
-            return HookResult.Continue;
-        }
-
-        if (!Config.JoinNotificationsEnabled)
-            return HookResult.Continue;
-
-        string playerName = player.PlayerName;
-        string profileUrl = player.AuthorizedSteamID.ToCommunityUrl().ToString();
-        string countryEmoji = GetPlayerCountryEmoji(player.IpAddress);
-
-        Task.Run(async () => await SendDiscordMessageAsync(Config.ServerChannelId, $":arrow_right: {countryEmoji} **[{playerName}](<{profileUrl}>)** has connected."));
+            { "{player_name}", player.PlayerName },
+            { "{profile_url}", player.AuthorizedSteamID.ToCommunityUrl().ToString() },
+            { "{country_emoji}", GetPlayerCountryEmoji(player.IpAddress) }
+        };
         
-        if (Config.BotStatusEnabled)
-        {
-            AddTimer(1.0f, UpdateBotStatus);
-        }
+        string formattedMessage = FormatMessage(Config.PlayerConnectFormat, replacements);
+
+        Task.Run(async () => await SendDiscordMessageAsync(Config.ServerChannelId, formattedMessage, Config.EmbedColorConnect));
+        
+        if (Config.BotStatusEnabled) AddTimer(1.0f, UpdateBotStatus);
         return HookResult.Continue;
     }
 
     [GameEventHandler]
     public HookResult OnPlayerDisconnect(EventPlayerDisconnect @event, GameEventInfo info)
     {
-        if (@event.Userid == null || @event.Networkid == "BOT")
-            return HookResult.Continue;
+        if (@event.Userid == null || @event.Networkid == "BOT") return HookResult.Continue;
             
         var steamId = new SteamID(@event.Networkid);
         ulong steamId64 = steamId.SteamId64;
+
+        if (_pendingDisconnects.TryGetValue(steamId64, out var existingTimer))
+        {
+            existingTimer.Kill();
+        }
 
         if (!Config.LeaveNotificationsEnabled)
         {
@@ -227,9 +231,6 @@ public partial class SimpleDiscordRelay : BasePlugin, IPluginConfig<PluginConfig
             return HookResult.Continue;
         }
 
-        string playerName = @event.Name;
-        string profileUrl = steamId.ToCommunityUrl().ToString();
-        
         string countryEmoji = ":flag_white:";
         if (_playerIpCache.TryGetValue(steamId64, out var ipInfo))
         {
@@ -237,32 +238,35 @@ public partial class SimpleDiscordRelay : BasePlugin, IPluginConfig<PluginConfig
             _playerIpCache.Remove(steamId64);
         }
 
-        var disconnectTimer = AddTimer(5.0f, () =>
+        var replacements = new Dictionary<string, string>
         {
-            Task.Run(async () => await SendDiscordMessageAsync(Config.ServerChannelId, $":arrow_left: {countryEmoji} **[{playerName}](<{profileUrl}>)** has disconnected."));
+            { "{player_name}", @event.Name },
+            { "{profile_url}", steamId.ToCommunityUrl().ToString() },
+            { "{country_emoji}", countryEmoji }
+        };
+        
+        string formattedMessage = FormatMessage(Config.PlayerDisconnectFormat, replacements);
+
+        var disconnectTimer = AddTimer(Config.DisconnectDelaySeconds, () =>
+        {
+            Task.Run(async () => await SendDiscordMessageAsync(Config.ServerChannelId, formattedMessage, Config.EmbedColorDisconnect));
             _pendingDisconnects.Remove(steamId64);
         });
         _pendingDisconnects[steamId64] = disconnectTimer;
         
-        if (Config.BotStatusEnabled)
-        {
-            AddTimer(1.0f, UpdateBotStatus);
-        }
+        if (Config.BotStatusEnabled) AddTimer(1.0f, UpdateBotStatus);
         return HookResult.Continue;
     }
 
     private void OnMapStart(string mapName)
     {
-        if (mapName.Equals("ar_baggage", StringComparison.OrdinalIgnoreCase))
-        {
-            return;
-        }
+        if (mapName.Equals("ar_baggage", StringComparison.OrdinalIgnoreCase)) return;
 
-        Task.Run(async () => await SendDiscordMessageAsync(Config.ServerChannelId, $":map: Map changed to **{mapName}**."));
-        if (Config.BotStatusEnabled)
-        {
-            UpdateBotStatus();
-        }
+        var replacements = new Dictionary<string, string> { { "{map_name}", mapName } };
+        string formattedMessage = FormatMessage(Config.MapChangeFormat, replacements);
+
+        Task.Run(async () => await SendDiscordMessageAsync(Config.ServerChannelId, formattedMessage, Config.EmbedColorMapChange));
+        if (Config.BotStatusEnabled) UpdateBotStatus();
     }
 
     private void OnMapEnd()
@@ -274,82 +278,82 @@ public partial class SimpleDiscordRelay : BasePlugin, IPluginConfig<PluginConfig
         }
     }
 
-    private async Task SendDiscordMessageAsync(ulong channelId, string message)
+    private async Task SendDiscordMessageAsync(ulong channelId, string message, string embedColor)
     {
-        if (_client == null || _client.ConnectionState != ConnectionState.Connected)
-        {
-            Console.WriteLine("[Discord Relay] Error: Discord client is not ready or initialized.");
-            return;
-        }
-        if (channelId == 0)
-        {
-            Console.WriteLine("[Discord Relay] Error: Cannot send message because the target Channel ID is 0. Please check your config.");
-            return;
-        }
+        if (_client == null || _client.ConnectionState != ConnectionState.Connected) return;
+        if (channelId == 0) return;
 
         try
         {
             var channel = await _client.GetChannelAsync(channelId) as IMessageChannel;
-            if (channel == null)
-            {
-                Console.WriteLine($"[Discord Relay] Error: Channel with ID {channelId} not found. The bot may not have access to it.");
-                return;
-            }
+            if (channel == null) return;
 
-            await channel.SendMessageAsync(message);
+            if (Config.UseEmbeds)
+            {
+                var color = new Color(uint.Parse(embedColor.Replace("#", ""), System.Globalization.NumberStyles.HexNumber));
+                var embed = new EmbedBuilder()
+                    .WithDescription(message)
+                    .WithColor(color)
+                    .Build();
+                await channel.SendMessageAsync(embed: embed);
+            }
+            else
+            {
+                await channel.SendMessageAsync(message);
+            }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[Discord Relay] FATAL: An exception occurred while sending a message to channel {channelId}.");
-            Console.WriteLine($"[Discord Relay] Details: {ex.Message}");
+            Console.WriteLine($"[Discord Relay] FATAL: An exception occurred while sending a message. Details: {ex.Message}");
         }
     }
 
     private void UpdateBotStatus()
     {
-        if (_client == null || !Config.BotStatusEnabled || _client.ConnectionState != ConnectionState.Connected)
-        {
-            return;
-        }
+        if (_client == null || !Config.BotStatusEnabled || _client.ConnectionState != ConnectionState.Connected) return;
 
         var playerCount = Utilities.GetPlayers().Count(p => p.IsValid && !p.IsBot);
         var maxPlayers = Server.MaxPlayers;
         var mapName = Server.MapName;
 
-        string status = Config.BotStatusMessage
-            .Replace("{PlayerCount}", playerCount.ToString())
-            .Replace("{MaxPlayers}", maxPlayers.ToString())
-            .Replace("{MapName}", mapName);
-
+        var replacements = new Dictionary<string, string>
+        {
+            { "{PlayerCount}", playerCount.ToString() },
+            { "{MaxPlayers}", maxPlayers.ToString() },
+            { "{MapName}", mapName }
+        };
+        
+        string status = FormatMessage(Config.BotStatusMessage, replacements);
         Task.Run(async () => await _client.SetGameAsync(status));
     }
 
     private string GetPlayerCountryEmoji(string? ipAddress)
     {
-        if (_geoIpReader == null || string.IsNullOrWhiteSpace(ipAddress))
-        {
-            return ":flag_white:";
-        }
-
+        if (_geoIpReader == null || string.IsNullOrWhiteSpace(ipAddress)) return ":flag_white:";
+        
         var ipOnly = ipAddress.Split(':')[0];
-        if (ipOnly == "127.0.0.1" || ipOnly.Contains("localhost"))
-        {
-            return ":flag_white:";
-        }
+        if (ipOnly == "127.0.0.1" || ipOnly.Contains("localhost")) return ":flag_white:";
 
         try
         {
-            var country = _geoIpReader.Country(ipOnly);
-            if (country?.Country?.IsoCode != null)
+            if (_geoIpReader.TryCountry(ipOnly, out var country) && country?.Country?.IsoCode != null)
             {
                 return $":flag_{country.Country.IsoCode.ToLower()}:";
             }
         }
-        catch (Exception)
-        {
-            // Ignore
-        }
+        catch (Exception) { /* Ignore */ }
 
         return ":flag_white:";
+    }
+    
+    private string FormatMessage(string template, Dictionary<string, string> replacements)
+    {
+        return replacements.Aggregate(template, (current, replacement) => current.Replace(replacement.Key, replacement.Value));
+    }
+
+    private string SanitizeDiscordMessage(string message)
+    {
+        // Prevents @everyone and @here pings
+        return message.Replace("@", "@\u200B");
     }
 }
